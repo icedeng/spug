@@ -4,8 +4,10 @@
 from django.views.generic import View
 from libs import json_response, JsonParser, Argument, auth
 from libs.spug import Notification
+from libs.push import get_contacts
 from apps.alarm.models import Alarm, Group, Contact
 from apps.monitor.models import Detection
+from apps.setting.utils import AppSetting
 import json
 
 
@@ -53,10 +55,25 @@ class GroupView(View):
 
 
 class ContactView(View):
-    @auth('alarm.contact.view|alarm.group.view')
+    @auth('alarm.contact.view|alarm.group.view|schedule.schedule.add|schedule.schedule.edit')
     def get(self, request):
-        contacts = Contact.objects.all()
-        return json_response(contacts)
+        form, error = JsonParser(
+            Argument('with_push', required=False),
+            Argument('only_push', required=False),
+        ).parse(request.GET)
+        if error is None:
+            response = []
+            if form.with_push or form.only_push:
+                push_key = AppSetting.get_default('spug_push_key')
+                if push_key:
+                    response = get_contacts(push_key)
+                if form.only_push:
+                    return json_response(response)
+
+            for item in Contact.objects.all():
+                response.append(item.to_dict())
+            return json_response(response)
+        return json_response(error=error)
 
     @auth('alarm.contact.add|alarm.contact.edit')
     def post(self, request):
@@ -98,19 +115,10 @@ def handle_test(request):
     ).parse(request.body)
     if error is None:
         notify = Notification(None, '1', 'https://spug.cc', 'Spug官网（测试）', '这是一条测试告警信息', None)
-        if form.mode in ('1', '2', '4') and not notify.spug_key:
-            return json_response(error='未配置调用凭据（系统设置/基本设置），请配置后再尝试。')
-
-        if form.mode == '1':
-            notify.monitor_by_wx([form.value])
-        elif form.mode == '2':
-            return json_response(error='目前暂不支持短信告警，请关注后续更新。')
-        elif form.mode == '3':
+        if form.mode == '3':
             notify.monitor_by_dd([form.value])
         elif form.mode == '4':
             notify.monitor_by_email([form.value])
         elif form.mode == '5':
             notify.monitor_by_qy_wx([form.value])
-        else:
-            return json_response(error='不支持的报警方式')
     return json_response(error=error)

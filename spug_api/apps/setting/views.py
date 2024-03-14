@@ -7,7 +7,7 @@ from django.conf import settings
 from libs import JsonParser, Argument, json_response, auth
 from libs.utils import generate_random_str
 from libs.mail import Mail
-from libs.spug import send_login_wx_code
+from libs.push import get_balance, send_login_code
 from libs.mixins import AdminView
 from apps.setting.utils import AppSetting
 from apps.setting.models import Setting, KEYS_DEFAULT
@@ -20,7 +20,10 @@ class SettingView(AdminView):
     def get(self, request):
         response = deepcopy(KEYS_DEFAULT)
         for item in Setting.objects.all():
-            response[item.key] = item.real_val
+            if item.key == 'spug_push_key':
+                response[item.key] = f'{item.real_val[:8]}********{item.real_val[-8:]}'
+            else:
+                response[item.key] = item.real_val
         return json_response(response)
 
     def post(self, request):
@@ -36,9 +39,13 @@ class SettingView(AdminView):
 class MFAView(AdminView):
     def get(self, request):
         if not request.user.wx_token:
-            return json_response(error='检测到当前账户未配置微信Token，请配置后再尝试启用MFA认证，否则可能造成系统无法正常登录。')
+            return json_response(
+                error='检测到当前账户未配置推送标识（账户管理/编辑），请配置后再尝试启用MFA认证，否则可能造成系统无法正常登录。')
+        spug_push_key = AppSetting.get_default('spug_push_key')
+        if not spug_push_key:
+            return json_response(error='检测到当前账户未绑定推送服务，请在系统设置/推送服务设置中绑定推送助手账户。')
         code = generate_random_str(6)
-        send_login_wx_code(request.user.wx_token, code)
+        send_login_code(spug_push_key, request.user.wx_token, code)
         cache.set(f'{request.user.username}:code', code, 300)
         return json_response()
 
@@ -103,16 +110,6 @@ def email_test(request):
 
 
 @auth('admin')
-def mfa_test(request):
-    if not request.user.wx_token:
-        return json_response(error='检测到当前账户未配置微信Token，请配置后再尝试启用MFA认证，否则可能造成系统无法正常登录。')
-    code = generate_random_str(6)
-    send_login_wx_code(request.user.wx_token, code)
-    cache.set(f'{request.user.username}:code', code, 300)
-    return json_response()
-
-
-@auth('admin')
 def get_about(request):
     return json_response({
         'python_version': platform.python_version(),
@@ -120,3 +117,32 @@ def get_about(request):
         'spug_version': settings.SPUG_VERSION,
         'django_version': django.get_version()
     })
+
+
+@auth('admin')
+def handle_push_bind(request):
+    form, error = JsonParser(
+        Argument('spug_push_key', required=False),
+    ).parse(request.body)
+    if error is None:
+        if not form.spug_push_key:
+            AppSetting.delete('spug_push_key')
+            return json_response()
+
+        try:
+            res = get_balance(form.spug_push_key)
+        except Exception as e:
+            return json_response(error=f'绑定失败：{e}')
+
+        AppSetting.set('spug_push_key', form.spug_push_key)
+        return json_response(res)
+    return json_response(error=error)
+
+
+@auth('admin')
+def handle_push_balance(request):
+    token = AppSetting.get_default('spug_push_key')
+    if not token:
+        return json_response(error='请先配置推送服务绑定账户')
+    res = get_balance(token)
+    return json_response(res)
